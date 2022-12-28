@@ -1,8 +1,8 @@
 # FROSTR
 
-Use `Flexible Round Optimized Schnorr Threshold` (FROST) signatures to create a threshold multisignature (`t-of-n`) nostr account with your friends.
+use `Flexible Round Optimized Schnorr Threshold` (FROST) signatures to create a joint nostr account with your friends.
 
-To make a post/event, you require `t-of-n` parties to individually sign.
+FROST is a threshold multisignature (`t-of-n`), so to make a post/event you require `t` parties to individually sign and contribute signature shares. These signature shares are then combined into a single schnorr signature which is valid under the joint public key.
 
 **Extremely unsafe and violently untested**
 
@@ -17,10 +17,11 @@ then `cargo run` or
 cargo install --path .
 frostr
 ```
-Choose menu options 0-1, copy-paste and share things between participants. Take care of only sharing "secrets" with the intended recipient!
+Choose menu options 0-1, copy-paste and share things between participants. Take care to only share "secrets" with the intended recipient!
 
 ## More about FROST
 [FROST Paper](https://eprint.iacr.org/2020/852.pdf)
+
 [Docs for our implementation & some important notes](https://docs.rs/schnorr_fun/latest/schnorr_fun/frost/index.html)
 
 ## todo (you?)
