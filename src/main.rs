@@ -1,9 +1,9 @@
-use std::io::Write;
+use std::{io::Write, str::FromStr, ops::Range, collections::BTreeMap};
 
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use schnorr_fun::{
     frost::{self, FrostKey},
-    Message, fun::{Scalar, marker::Normal},
+    Message, fun::{Scalar, marker::{Normal, Zero, Secret}, Point}, Signature,
 };
 use rand_chacha::ChaCha20Rng;
 use sha2::Sha256;
@@ -12,6 +12,37 @@ use sha2::Sha256;
 struct FrostKeyPair {
     frost_key: FrostKey<Normal>,
     secret_share: Scalar,
+}
+
+fn get_things_from_parties<T: for<'a> Deserialize<'a>>(prompt: &str, our_index: usize, parties: Range<usize>) -> BTreeMap<usize, T> {
+    let mut items = BTreeMap::new();
+    for i in parties {
+        if i == our_index {
+            continue
+        }
+        let their_poly: T = loop {
+            print!("{} {}: ", prompt, i);
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            
+            let trimmed_line = line.trim().to_string();
+            let quoted_line = if trimmed_line.contains('"') {
+                trimmed_line
+            } else {
+                format!(r#""{}""#, trimmed_line)
+            };
+            println!("{}", &quoted_line);
+
+            match serde_json::from_str(&quoted_line) {
+                Ok(poly) => break poly,
+                Err(e) => eprintln!("{:?}", e),
+            };
+        };
+        items.insert(i, their_poly);
+    }
+    println!("\n");
+    items
 }
 
 fn frost_keygen(threshold: usize, n_parties: usize) {
@@ -32,30 +63,12 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
     let our_index = line.trim().parse::<usize>().expect("valid index");
 
     println!("Share our public polynomial: (index {}) - {}", our_index, my_poly_str);
-
-    // Receive the point polys from other participants
-    let mut public_polys = vec![];
-    println!("Fetch others' polynomials...");
-    for i in 0..n_parties {
-        if i == our_index {
-            public_polys.push(my_public_poly.clone());
-            continue
-        }
-        let their_poly = loop {
-            print!("Paste the polynomial for participant {}: ", i);
-            let _ = std::io::stdout().flush();
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).unwrap();
-            match serde_json::from_str(&line) {
-                Ok(poly) => break poly,
-                Err(e) => eprint!("{:?}", e),
-            };
-        };
-        public_polys.push(their_poly);
-    }
     println!("\n\n");
 
-    let keygen = frost.new_keygen(public_polys).expect("something wrong with what was provided by other parties");
+    let mut public_polys = get_things_from_parties::<Vec<Point>>("Paste the polynomial for participant", our_index, 0..n_parties);
+    public_polys.insert(our_index, my_public_poly);
+
+    let keygen = frost.new_keygen(public_polys.into_iter().map(|(_, poly)| poly).collect()).expect("something wrong with what was provided by other parties");
     // Generate secret shares for others and proof-of-possession to protect against rogue key attacks.
     let (my_shares, my_pop) = frost.create_shares(&keygen, my_secret_poly);
 
@@ -63,45 +76,15 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
         if i == our_index {
             continue
         }
-        println!("Secretly send these to participant {}: \nShare: {}\nProof-of-Possession: {}\n", i, share, my_pop.clone());
+        println!("Secretly send these to participant {}:\n\tSecret Share: {}\n\t Proof-of-Possession: {}\n", i, serde_json::to_string(share).unwrap(), serde_json::to_string(&my_pop).unwrap());
     }
     println!("\n\n");
 
-    // Receive the point polys from other participants
-    let mut shares = vec![];
-    let mut pops = vec![];
-    println!("Fetch others' secret shares and proofs-of-possession...");
-    for i in 0..n_parties {
-        if i == our_index {
-            shares.push(my_shares[i].clone());
-            pops.push(my_pop.clone());
-            continue
-        }
-        let received_share = loop {
-            print!("Paste the secret share from participant {}: ", i);
-            let _ = std::io::stdout().flush();
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).unwrap();
-            match serde_json::from_str(&line) {
-                Ok(share) => break share,
-                Err(e) => eprint!("{:?}", e),
-            };
-        };
-        shares.push(received_share);
-        
-        let received_pop = loop {
-            print!("Paste the proof-of-posession from participant {}: ", i);
-            let _ = std::io::stdout().flush();
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).unwrap();
-            match serde_json::from_str(&line) {
-                Ok(pop) => break pop,
-                Err(e) => eprint!("{:?}", e),
-            };
-        };
-        pops.push(received_pop);
-    }
-    println!("\n\n");
+    let mut shares = get_things_from_parties::<Scalar<Secret, Zero>>("Paste the Secret Share from participant", our_index, 0..n_parties);
+    shares.insert(our_index, my_shares[our_index].clone());
+
+    let mut pops = get_things_from_parties::<Signature>("Paste the Proof-of-Possession from participant", our_index, 0..n_parties);
+    pops.insert(our_index, my_pop);
 
     // finish keygen by verifying the shares we received, verifying all proofs-of-possession,
     // and calculate our long-lived secret share of the joint FROST key.
@@ -109,8 +92,8 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
         .finish_keygen(
             keygen.clone(),
             our_index,
-            shares,
-            pops,
+            shares.into_iter().map(|(_, share)| share).collect(),
+            pops.into_iter().map(|(_, pop)| pop).collect(),
         )
         .unwrap();
 
@@ -118,8 +101,9 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
 
     print!("Enter a name for this FROST key (saved to file): ");
     let _ = std::io::stdout().flush();
-    let mut frost_key_name = String::new();
-    std::io::stdin().read_line(&mut frost_key_name).unwrap();
+    let mut frost_key_name_input = String::new();
+    std::io::stdin().read_line(&mut frost_key_name_input).unwrap();
+    let frost_key_name = frost_key_name_input.trim();
     std::fs::write(format!("{}.frost", frost_key_name), serde_json::to_string(&frost_kp).unwrap()).expect("Unable to save frost file to disk");
     
     // // We're ready to do some signing, so convert to xonly key
