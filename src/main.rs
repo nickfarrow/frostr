@@ -235,6 +235,15 @@ fn broadcast_event(event: Event) {
 
 fn main() {
     loop {
+        println!("
+╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━━╮╱╭━━━╮
+╱┃╭━━╯╱┃╭━╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭╮╭╮┃╱┃╭━╮┃
+╱┃╰━━╮╱┃╰━╯┃╱┃┃╱┃┃╱┃╰━━╮╱╰╯┃┃╰╯╱┃╰━╯┃
+╱┃╭━━╯╱┃╭╮╭╯╱┃┃╱┃┃╱╰━━╮┃╱╱╱┃┃╱╱╱┃╭╮╭╯
+╱┃┃╱╱╱╱┃┃┃╰╮╱┃╰━╯┃╱┃╰━╯┃╱╱╱┃┃╱╱╱┃┃┃╰╮
+╱╰╯╱╱╱╱╰╯╰━╯╱╰━━━╯╱╰━━━╯╱╱╱╰╯╱╱╱╰╯╰━╯
+");
+
         print!("Choose an option:\n\t0) New Frost Keygen\n\t1) Sign using existing FROST key\n\nSelection: ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
