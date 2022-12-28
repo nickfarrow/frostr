@@ -1,3 +1,5 @@
+![image](https://user-images.githubusercontent.com/24557779/209822817-277b1cc8-1208-4362-b5b2-54bfc5a3417a.png)
+
 # FROSTR
 
 use `Flexible Round Optimized Schnorr Threshold` (FROST) signatures to create a joint nostr account with your friends.
