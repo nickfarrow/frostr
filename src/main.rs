@@ -1,15 +1,20 @@
-use std::{io::Write, collections::BTreeMap};
+use std::{collections::BTreeMap, io::Write};
 
-use serde::{Serialize, Deserialize};
+use rand_chacha::ChaCha20Rng;
 use schnorr_fun::{
     frost::{self, FrostKey},
-    Message, fun::{Scalar, marker::{Zero, Secret, Public, NonZero, EvenY}, Point}, Signature, musig::Nonce,
+    fun::{
+        marker::{EvenY, NonZero, Public, Secret, Zero},
+        Point, Scalar,
+    },
+    musig::Nonce,
+    Message, Signature,
 };
-use rand_chacha::ChaCha20Rng;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Digest;
 use sha2::Sha256;
 use websocket::ClientBuilder;
-use sha2::Digest;
 
 #[derive(Serialize, Deserialize)]
 struct FrostKeyPair {
@@ -18,20 +23,23 @@ struct FrostKeyPair {
     our_index: usize,
 }
 
-
 // Helper function which `prompt`s for some user input and serializes the required info from parties, skipping our own index
-fn get_things_from_parties<T: for<'a> Deserialize<'a>>(prompt: &str, our_index: usize, parties: Vec<usize>) -> BTreeMap<usize, T> {
+fn get_things_from_parties<T: for<'a> Deserialize<'a>>(
+    prompt: &str,
+    our_index: usize,
+    parties: Vec<usize>,
+) -> BTreeMap<usize, T> {
     let mut items = BTreeMap::new();
     for i in parties {
         if i == our_index {
-            continue
+            continue;
         }
         let their_poly: T = loop {
             print!("{} {}: ", prompt, i);
             let _ = std::io::stdout().flush();
             let mut line = String::new();
             std::io::stdin().read_line(&mut line).unwrap();
-            
+
             let trimmed_line = line.trim().to_string();
             let quoted_line = if trimmed_line.contains('"') {
                 trimmed_line
@@ -67,28 +75,45 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
     std::io::stdin().read_line(&mut line).unwrap();
     let our_index = line.trim().parse::<usize>().expect("valid index");
 
-    println!("Share our public polynomial: (index {}) - {}", our_index, my_poly_str);
+    println!(
+        "Share our public polynomial\n\t(index {}): {}",
+        our_index, my_poly_str
+    );
     println!("\n\n");
 
-    let mut public_polys = get_things_from_parties::<Vec<Point>>("Paste the polynomial for participant", our_index, (0..n_parties).collect());
+    let mut public_polys = get_things_from_parties::<Vec<Point>>(
+        "Paste the polynomial for participant",
+        our_index,
+        (0..n_parties).collect(),
+    );
     public_polys.insert(our_index, my_public_poly);
 
-    let keygen = frost.new_keygen(public_polys.into_iter().map(|(_, poly)| poly).collect()).expect("something wrong with what was provided by other parties");
+    let keygen = frost
+        .new_keygen(public_polys.into_iter().map(|(_, poly)| poly).collect())
+        .expect("something wrong with what was provided by other parties");
     // Generate secret shares for others and proof-of-possession to protect against rogue key attacks.
     let (my_shares, my_pop) = frost.create_shares(&keygen, my_secret_poly);
 
     for (i, share) in my_shares.iter().enumerate() {
         if i == our_index {
-            continue
+            continue;
         }
         println!("Secretly send these to participant {}:\n\tSecret Share: {}\n\tProof-of-Possession: {}\n", i, serde_json::to_string(share).unwrap(), serde_json::to_string(&my_pop).unwrap());
     }
     println!("\n\n");
 
-    let mut shares = get_things_from_parties::<Scalar<Secret, Zero>>("Paste the Secret Share from participant", our_index, (0..n_parties).collect());
+    let mut shares = get_things_from_parties::<Scalar<Secret, Zero>>(
+        "Paste the Secret Share from participant",
+        our_index,
+        (0..n_parties).collect(),
+    );
     shares.insert(our_index, my_shares[our_index].clone());
 
-    let mut pops = get_things_from_parties::<Signature>("Paste the Proof-of-Possession from participant", our_index, (0..n_parties).collect());
+    let mut pops = get_things_from_parties::<Signature>(
+        "Paste the Proof-of-Possession from participant",
+        our_index,
+        (0..n_parties).collect(),
+    );
     pops.insert(our_index, my_pop);
 
     // finish keygen by verifying the shares we received, verifying all proofs-of-possession,
@@ -102,43 +127,75 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
         )
         .unwrap();
 
-    let frost_kp = FrostKeyPair { frost_key: frost_key.into_xonly_key(), secret_share, our_index };
+    let frost_kp = FrostKeyPair {
+        frost_key: frost_key.into_xonly_key(),
+        secret_share,
+        our_index,
+    };
 
     print!("Enter a name for this FROST key (saved to file): ");
     let _ = std::io::stdout().flush();
     let mut frost_key_name_input = String::new();
-    std::io::stdin().read_line(&mut frost_key_name_input).unwrap();
+    std::io::stdin()
+        .read_line(&mut frost_key_name_input)
+        .unwrap();
     let frost_key_name = frost_key_name_input.trim();
-    std::fs::write(format!("{}.frost", frost_key_name), serde_json::to_string(&frost_kp).unwrap()).expect("Unable to save frost file to disk");
-    
-
+    std::fs::write(
+        format!("{}.frost", frost_key_name),
+        serde_json::to_string(&frost_kp).unwrap(),
+    )
+    .expect("Unable to save frost file to disk");
 }
-
 
 fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>) -> Signature {
     let frost = frost::new_with_synthetic_nonces::<Sha256, rand::rngs::ThreadRng>();
-    let message: Message<Public> =  Message::plain("frostr", message.as_bytes());
+    let message: Message<Public> = Message::plain("frostr", message.as_bytes());
     // // Generate nonces for this signing session.
     // // ⚠ session_id must be different for every signing attempt
     let session_id = b"my extremely unique sid".as_slice();
-    let mut nonce_rng: ChaCha20Rng = frost.seed_nonce_rng(&frost_keypair.frost_key, &frost_keypair.secret_share, session_id);
+    let mut nonce_rng: ChaCha20Rng = frost.seed_nonce_rng(
+        &frost_keypair.frost_key,
+        &frost_keypair.secret_share,
+        session_id,
+    );
     let my_nonce = frost.gen_nonce(&mut nonce_rng);
     // share your public nonce with the other signing participant(s)
-    println!("Share your public nonce with the other signers: {}", serde_json::to_string(&my_nonce.public()).unwrap());
+    println!(
+        "Share your public nonce with the other signers:\n\t(index {}): {}",
+        frost_keypair.our_index,
+        serde_json::to_string(&my_nonce.public()).unwrap()
+    );
     println!("\n\n");
 
     // receive public nonces from other signers
-    let mut nonces = get_things_from_parties::<Nonce<NonZero>>("Paste the Public Nonce from participant", frost_keypair.our_index, signing_parties.clone());
+    let mut nonces = get_things_from_parties::<Nonce<NonZero>>(
+        "Paste the Public Nonce from participant",
+        frost_keypair.our_index,
+        signing_parties.clone(),
+    );
     nonces.insert(frost_keypair.our_index, my_nonce.public());
-
 
     let nonces = nonces.into_iter().collect();
     // start a sign session with these nonces for a message
     let session = frost.start_sign_session(&frost_keypair.frost_key, nonces, message);
     // create a partial signature using our secret share and secret nonce
-    let my_sig = frost.sign(&frost_keypair.frost_key, &session, frost_keypair.our_index, &frost_keypair.secret_share, my_nonce);
-    println!("Send your Signature Share to all of the other signers: {}", serde_json::to_string(&my_sig).unwrap());
-    let mut sig_shares = get_things_from_parties::<Scalar<Public, Zero>>("Paste the Signature Share from participant", frost_keypair.our_index, signing_parties.clone());
+    let my_sig = frost.sign(
+        &frost_keypair.frost_key,
+        &session,
+        frost_keypair.our_index,
+        &frost_keypair.secret_share,
+        my_nonce,
+    );
+    println!(
+        "Send your Signature Share to all of the other signers:\n\t(index {}): {}",
+        frost_keypair.our_index,
+        serde_json::to_string(&my_sig).unwrap()
+    );
+    let mut sig_shares = get_things_from_parties::<Scalar<Public, Zero>>(
+        "Paste the Signature Share from participant",
+        frost_keypair.our_index,
+        signing_parties.clone(),
+    );
     if signing_parties.contains(&frost_keypair.our_index) {
         sig_shares.insert(frost_keypair.our_index, my_sig);
     }
@@ -149,7 +206,11 @@ fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>)
     }
 
     // combine signature shares into a single signature that is valid under the FROST key
-    let combined_sig = frost.combine_signature_shares(&frost_keypair.frost_key, &session, sig_shares.into_iter().map(|(_, sig)| sig).collect());
+    let combined_sig = frost.combine_signature_shares(
+        &frost_keypair.frost_key,
+        &session,
+        sig_shares.into_iter().map(|(_, sig)| sig).collect(),
+    );
     assert!(frost.schnorr.verify(
         &frost_keypair.frost_key.public_key(),
         message,
@@ -158,7 +219,6 @@ fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>)
 
     combined_sig
 }
-
 
 #[derive(Serialize)]
 struct Event {
@@ -172,9 +232,18 @@ struct Event {
 }
 
 impl Event {
-    fn new_unsigned(pubkey: Point<EvenY>, kind: u64, tags: Vec<Vec<String>>, content: String, event_time: i64) -> Self {
+    fn new_unsigned(
+        pubkey: Point<EvenY>,
+        kind: u64,
+        tags: Vec<Vec<String>>,
+        content: String,
+        event_time: i64,
+    ) -> Self {
         let serialized_event = json!([0, pubkey, event_time, kind, json!(tags), content]);
-        println!("This is the FROSTR event to be created: {}\n", &serialized_event);
+        println!(
+            "This is the FROSTR event to be created: {}\n",
+            &serialized_event
+        );
 
         let mut hash = Sha256::default();
         hash.update(serialized_event.to_string().as_bytes());
@@ -197,7 +266,6 @@ impl Event {
         self.sig = Some(signature);
     }
 }
-
 
 fn publish_to_relay(relay: &str, message: &websocket::Message) -> Result<(), String> {
     let mut client = ClientBuilder::new(relay)
@@ -232,19 +300,21 @@ fn broadcast_event(event: Event) {
     }
 }
 
-
 fn main() {
     loop {
-        println!("
+        println!(
+            "
 ╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━━╮╱╭━━━╮
 ╱┃╭━━╯╱┃╭━╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭╮╭╮┃╱┃╭━╮┃
 ╱┃╰━━╮╱┃╰━╯┃╱┃┃╱┃┃╱┃╰━━╮╱╰╯┃┃╰╯╱┃╰━╯┃
 ╱┃╭━━╯╱┃╭╮╭╯╱┃┃╱┃┃╱╰━━╮┃╱╱╱┃┃╱╱╱┃╭╮╭╯
 ╱┃┃╱╱╱╱┃┃┃╰╮╱┃╰━╯┃╱┃╰━╯┃╱╱╱┃┃╱╱╱┃┃┃╰╮
 ╱╰╯╱╱╱╱╰╯╰━╯╱╰━━━╯╱╰━━━╯╱╱╱╰╯╱╱╱╰╯╰━╯
-");
-
-        print!("Choose an option:\n\t0) New Frost Keygen\n\t1) Sign using existing FROST key\n\nSelection: ");
+"
+        );
+        println!("** Extremely unsafe and violently untested **");
+        println!("Note that all indices start from 0.\n");
+        print!("Choose an option:\n\t0) New FROST Keygen\n\t1) Create FROSTR post\n\nSelection: ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).unwrap();
@@ -263,7 +333,6 @@ fn main() {
             let threshold = line.trim().parse::<usize>().unwrap();
 
             frost_keygen(threshold, n_parties)
-
         } else if choice == "1" {
             print!("Type the name of the frost key you wish to use: ");
             let _ = std::io::stdout().flush();
@@ -271,7 +340,8 @@ fn main() {
             std::io::stdin().read_line(&mut line).unwrap();
             let frost_key_name = line.trim();
 
-            let frost_key_str = std::fs::read_to_string(format!("{}.frost", frost_key_name)).expect("Unable to read file");
+            let frost_key_str = std::fs::read_to_string(format!("{}.frost", frost_key_name))
+                .expect("Unable to read file");
             let frost_keypair: FrostKeyPair = serde_json::from_str(&frost_key_str).unwrap();
 
             print!("Enter the nostr message you wish to sign (as a group!): ");
@@ -288,7 +358,10 @@ fn main() {
 
             let mut signers = vec![];
             while signers.len() < frost_keypair.frost_key.threshold() {
-                print!("Enter the index of a signer ({} remaining): ", frost_keypair.frost_key.threshold() - signers.len());
+                print!(
+                    "Enter the index of a signer ({} remaining): ",
+                    frost_keypair.frost_key.threshold() - signers.len()
+                );
                 let _ = std::io::stdout().flush();
                 let mut line = String::new();
                 std::io::stdin().read_line(&mut line).unwrap();
@@ -296,7 +369,13 @@ fn main() {
                 signers.push(signer_index);
             }
 
-            let mut frostr_event = Event::new_unsigned(frost_keypair.frost_key.public_key(), 1, Vec::new(), nostr_post_str, event_time);
+            let mut frostr_event = Event::new_unsigned(
+                frost_keypair.frost_key.public_key(),
+                1,
+                Vec::new(),
+                nostr_post_str,
+                event_time,
+            );
 
             let signature = sign(frost_keypair, &frostr_event.id, signers);
             println!("Final FROST signature: {}", signature.clone());
@@ -310,7 +389,6 @@ fn main() {
             if response == "y" {
                 broadcast_event(frostr_event);
             }
-
         } else {
             eprintln!("Invalid choice!");
         }
