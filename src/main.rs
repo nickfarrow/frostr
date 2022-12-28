@@ -1,3 +1,9 @@
+// FROSTR
+//
+// This code is an absolute mess
+// If you're interested in FROST I would highly recommend reading:
+// https://docs.rs/schnorr_fun/latest/schnorr_fun/frost/index.html
+
 use std::{collections::BTreeMap, io::Write};
 
 use rand::RngCore;
@@ -16,13 +22,6 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use websocket::ClientBuilder;
-
-#[derive(Serialize, Deserialize)]
-struct FrostKeyPair {
-    frost_key: FrostKey<EvenY>,
-    secret_share: Scalar,
-    our_index: usize,
-}
 
 // Helper function which `prompt`s for some user input and serializes the required info from parties, skipping our own index
 fn get_things_from_parties<T: for<'a> Deserialize<'a>>(
@@ -57,6 +56,13 @@ fn get_things_from_parties<T: for<'a> Deserialize<'a>>(
     }
     println!("\n");
     items
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrostKeyPair {
+    frost_key: FrostKey<EvenY>,
+    secret_share: Scalar,
+    our_index: usize,
 }
 
 fn frost_keygen(threshold: usize, n_parties: usize) {
@@ -293,6 +299,7 @@ struct SignedEvent {
     sig: Signature,
 }
 
+// Adapted from https://github.com/rot13maxi/moe-bot/
 fn publish_to_relay(relay: &str, message: &websocket::Message) -> Result<(), String> {
     let mut client = ClientBuilder::new(relay)
         .map_err(|err| format!("Could not create client: {}", err.to_string()))?
@@ -304,6 +311,7 @@ fn publish_to_relay(relay: &str, message: &websocket::Message) -> Result<(), Str
     Ok(())
 }
 
+// Adapted from https://github.com/rot13maxi/moe-bot/
 fn broadcast_event(event: SignedEvent) {
     let event_json = json!(event).to_string();
     dbg!("{}", &event_json);
