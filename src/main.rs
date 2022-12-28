@@ -96,7 +96,7 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
     public_polys.insert(our_index, my_public_poly);
 
     let keygen = frost
-        .new_keygen(public_polys.into_iter().map(|(_, poly)| poly).collect())
+        .new_keygen((0..n_parties).map(|i| public_polys.get(&i).expect("got poly from party").clone()).collect())
         .expect("something wrong with what was provided by other parties");
     // Generate secret shares for others and proof-of-possession to protect against rogue key attacks.
     let (my_shares, my_pop) = frost.create_shares(&keygen, my_secret_poly);
@@ -129,8 +129,8 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
         .finish_keygen(
             keygen.clone(),
             our_index,
-            shares.into_iter().map(|(_, share)| share).collect(),
-            pops.into_iter().map(|(_, pop)| pop).collect(),
+            (0..n_parties).map(|i| shares.get(&i).expect("got share from party").clone()).collect(),
+            (0..n_parties).map(|i| pops.get(&i).expect("got pop from party").clone()).collect(),
         )
         .unwrap();
 
@@ -222,7 +222,7 @@ fn sign(
     let combined_sig = frost.combine_signature_shares(
         &frost_keypair.frost_key,
         &session,
-        sig_shares.into_iter().map(|(_, sig)| sig).collect(),
+        signing_parties.iter().map(|i| sig_shares.get(&i).expect("got sig share from party").clone()).collect()
     );
     assert!(frost.schnorr.verify(
         &frost_keypair.frost_key.public_key(),
