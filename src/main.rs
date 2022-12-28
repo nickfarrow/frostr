@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, io::Write};
 
+use rand::RngCore;
 use rand_chacha::ChaCha20Rng;
 use schnorr_fun::{
     frost::{self, FrostKey},
@@ -147,16 +148,22 @@ fn frost_keygen(threshold: usize, n_parties: usize) {
     .expect("Unable to save frost file to disk");
 }
 
-fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>) -> Signature {
+fn sign(
+    frost_keypair: &FrostKeyPair,
+    message: Message<Public>,
+    signing_parties: Vec<usize>,
+) -> Signature {
     let frost = frost::new_with_synthetic_nonces::<Sha256, rand::rngs::ThreadRng>();
-    let message: Message<Public> = Message::plain("frostr", message.as_bytes());
     // // Generate nonces for this signing session.
     // // ⚠ session_id must be different for every signing attempt
-    let session_id = b"my extremely unique sid".as_slice();
+    let mut session_id = [0u8; 32];
+    let mut rng = rand::thread_rng();
+    rng.fill_bytes(&mut session_id);
+
     let mut nonce_rng: ChaCha20Rng = frost.seed_nonce_rng(
         &frost_keypair.frost_key,
         &frost_keypair.secret_share,
-        session_id,
+        &session_id,
     );
     let my_nonce = frost.gen_nonce(&mut nonce_rng);
     // share your public nonce with the other signing participant(s)
@@ -187,7 +194,7 @@ fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>)
         my_nonce,
     );
     println!(
-        "Send your Signature Share to all of the other signers:\n\t(index {}): {}",
+        "Send your Signature Share to all of the other signers:\n\t(index {}): {}\n",
         frost_keypair.our_index,
         serde_json::to_string(&my_sig).unwrap()
     );
@@ -220,26 +227,26 @@ fn sign(frost_keypair: FrostKeyPair, message: &str, signing_parties: Vec<usize>)
     combined_sig
 }
 
-#[derive(Serialize)]
-struct Event {
+struct UnsignedEvent {
     id: String,
     pubkey: Point<EvenY>,
     created_at: i64,
     kind: u64,
     tags: Vec<Vec<String>>,
     content: String,
-    sig: Option<Signature>,
+    //hacky and gross
+    hash_bytes: Vec<u8>,
 }
 
-impl Event {
+impl UnsignedEvent {
     fn new_unsigned(
         pubkey: Point<EvenY>,
         kind: u64,
         tags: Vec<Vec<String>>,
         content: String,
-        event_time: i64,
+        created_at: i64,
     ) -> Self {
-        let serialized_event = json!([0, pubkey, event_time, kind, json!(tags), content]);
+        let serialized_event = json!([0, pubkey, created_at, kind, json!(tags), content]);
         println!(
             "This is the FROSTR event to be created: {}\n",
             &serialized_event
@@ -247,24 +254,43 @@ impl Event {
 
         let mut hash = Sha256::default();
         hash.update(serialized_event.to_string().as_bytes());
-        let hash_bytes = hash.finalize();
-        let message: Message<Public> = Message::raw(&hash_bytes);
-        let id = message.bytes.to_string();
+        let hash_result = hash.finalize();
+        let hash_result_str = format!("{:x}", hash_result);
+        // let schnorr_message: Message<Public> = Message::raw(&hash_result[..]);
 
         Self {
-            id,
+            id: hash_result_str,
             pubkey,
-            created_at: event_time,
+            created_at,
             kind,
             tags,
             content,
-            sig: None,
+            hash_bytes: hash_result.to_vec(),
         }
     }
 
-    fn add_signature(&mut self, signature: Signature) {
-        self.sig = Some(signature);
+    fn add_signature(self, signature: Signature) -> SignedEvent {
+        SignedEvent {
+            id: self.id,
+            pubkey: self.pubkey,
+            created_at: self.created_at,
+            kind: self.kind,
+            tags: self.tags,
+            content: self.content,
+            sig: signature,
+        }
     }
+}
+
+#[derive(Serialize)]
+struct SignedEvent {
+    id: String,
+    pubkey: Point<EvenY>,
+    created_at: i64,
+    kind: u64,
+    tags: Vec<Vec<String>>,
+    content: String,
+    sig: Signature,
 }
 
 fn publish_to_relay(relay: &str, message: &websocket::Message) -> Result<(), String> {
@@ -278,7 +304,7 @@ fn publish_to_relay(relay: &str, message: &websocket::Message) -> Result<(), Str
     Ok(())
 }
 
-fn broadcast_event(event: Event) {
+fn broadcast_event(event: SignedEvent) {
     let event_json = json!(event).to_string();
     dbg!("{}", &event_json);
 
@@ -369,7 +395,7 @@ fn main() {
                 signers.push(signer_index);
             }
 
-            let mut frostr_event = Event::new_unsigned(
+            let unsigned_frostr_event = UnsignedEvent::new_unsigned(
                 frost_keypair.frost_key.public_key(),
                 1,
                 Vec::new(),
@@ -377,16 +403,18 @@ fn main() {
                 event_time,
             );
 
-            let signature = sign(frost_keypair, &frostr_event.id, signers);
+            let schnorr_message = Message::raw(unsigned_frostr_event.hash_bytes.as_slice());
+            let signature = sign(&frost_keypair, schnorr_message, signers);
             println!("Final FROST signature: {}", signature.clone());
-            frostr_event.add_signature(signature);
+
+            let frostr_event = unsigned_frostr_event.add_signature(signature);
 
             print!("Do you wish to broadcast this event? (y/n): ");
             let _ = std::io::stdout().flush();
             let mut line = String::new();
             std::io::stdin().read_line(&mut line).unwrap();
             let response = line.trim();
-            if response == "y" {
+            if response.to_lowercase() == "y" {
                 broadcast_event(frostr_event);
             }
         } else {
